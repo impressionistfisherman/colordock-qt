@@ -1,0 +1,5 @@
+// Windows 리소스 파일
+// 관리자 권한 요청 매니페스트
+#include <windows.h>
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"

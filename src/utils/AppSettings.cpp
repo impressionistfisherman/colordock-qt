@@ -1,0 +1,1 @@
+// AppSettings is header-only
