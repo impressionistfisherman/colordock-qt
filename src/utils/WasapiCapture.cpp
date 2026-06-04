@@ -28,7 +28,11 @@ WasapiCapture::~WasapiCapture()
 bool WasapiCapture::startCapture()
 {
     if (m_running.load()) return true;
-    m_sampleBuf.clear();
+    {
+        QMutexLocker lk(&m_bufMutex);
+        m_sampleBuf.clear();
+        m_bufOffset = 0;
+    }
     m_running = true;
     start(QThread::HighPriority);
     return true;
@@ -44,37 +48,46 @@ void WasapiCapture::run()
 #ifdef Q_OS_WIN
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
-    IMMDeviceEnumerator *enumerator = nullptr;
-    IMMDevice           *device     = nullptr;
-    IAudioClient        *client     = nullptr;
-    IAudioCaptureClient *capture    = nullptr;
-    WAVEFORMATEX        *format     = nullptr;
+    // RAII 래퍼 — goto 대신 람다로 goto 범위 제한 (C++ UB 회피)
+    auto doCapture = [this]() -> QString {
+        IMMDeviceEnumerator *enumerator = nullptr;
+        IMMDevice           *device     = nullptr;
+        IAudioClient        *client     = nullptr;
+        IAudioCaptureClient *capture    = nullptr;
+        WAVEFORMATEX        *format     = nullptr;
 
-    HRESULT hr = CoCreateInstance(
-        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-        __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
-    if (FAILED(hr)) { emit captureError("COM: MMDeviceEnumerator 생성 실패"); goto cleanup; }
+        auto cleanup = [&]() {
+            CoTaskMemFree(format);
+            SAFE_RELEASE(capture);
+            SAFE_RELEASE(client);
+            SAFE_RELEASE(device);
+            SAFE_RELEASE(enumerator);
+        };
 
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-    if (FAILED(hr)) { emit captureError("기본 오디오 출력 장치를 찾을 수 없습니다."); goto cleanup; }
+        HRESULT hr = CoCreateInstance(
+            __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+            __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
+        if (FAILED(hr)) { cleanup(); return "COM: MMDeviceEnumerator 생성 실패"; }
 
-    hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                          reinterpret_cast<void**>(&client));
-    if (FAILED(hr)) { emit captureError("IAudioClient 활성화 실패"); goto cleanup; }
+        hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (FAILED(hr)) { cleanup(); return "기본 오디오 출력 장치를 찾을 수 없습니다."; }
 
-    hr = client->GetMixFormat(&format);
-    if (FAILED(hr)) { emit captureError("오디오 포맷 조회 실패"); goto cleanup; }
+        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                              reinterpret_cast<void**>(&client));
+        if (FAILED(hr)) { cleanup(); return "IAudioClient 활성화 실패"; }
 
-    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                             AUDCLNT_STREAMFLAGS_LOOPBACK,
-                             10000000, 0, format, nullptr);
-    if (FAILED(hr)) { emit captureError("IAudioClient 초기화 실패"); goto cleanup; }
+        hr = client->GetMixFormat(&format);
+        if (FAILED(hr)) { cleanup(); return "오디오 포맷 조회 실패"; }
 
-    hr = client->GetService(__uuidof(IAudioCaptureClient),
-                             reinterpret_cast<void**>(&capture));
-    if (FAILED(hr)) { emit captureError("IAudioCaptureClient 가져오기 실패"); goto cleanup; }
+        hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+                                 AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                 10000000, 0, format, nullptr);
+        if (FAILED(hr)) { cleanup(); return "IAudioClient 초기화 실패"; }
 
-    {
+        hr = client->GetService(__uuidof(IAudioCaptureClient),
+                                 reinterpret_cast<void**>(&capture));
+        if (FAILED(hr)) { cleanup(); return "IAudioCaptureClient 가져오기 실패"; }
+
         int channels   = static_cast<int>(format->nChannels);
         int sampleRate = static_cast<int>(format->nSamplesPerSec);
 
@@ -83,21 +96,16 @@ void WasapiCapture::run()
             auto *ext = reinterpret_cast<WAVEFORMATEXTENSIBLE*>(format);
             isFloat = guidEq(ext->SubFormat, CD_SUBTYPE_IEEE_FLOAT);
         }
-
-        if (!isFloat) {
-            emit captureError("float32 포맷이 아닙니다 — 데모 모드로 전환합니다.");
-            goto cleanup;
-        }
+        if (!isFloat) { cleanup(); return "float32 포맷이 아닙니다 — 데모 모드로 전환합니다."; }
 
         client->Start();
-
         while (m_running.load()) {
             UINT32 packetSize = 0;
             hr = capture->GetNextPacketSize(&packetSize);
             if (FAILED(hr)) break;
             if (packetSize == 0) { QThread::msleep(8); continue; }
 
-            BYTE  *data  = nullptr;
+            BYTE  *data   = nullptr;
             UINT32 frames = 0;
             DWORD  flags  = 0;
             hr = capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
@@ -106,25 +114,20 @@ void WasapiCapture::run()
             if (data && frames > 0 && !(flags & AUDCLNT_BUFFERFLAGS_SILENT))
                 processBuffer(reinterpret_cast<const float*>(data),
                               static_cast<int>(frames), channels, sampleRate);
-
             capture->ReleaseBuffer(frames);
         }
-
         client->Stop();
-    }
+        cleanup();
+        return {};
+    };
 
-cleanup:
-    CoTaskMemFree(format);
-    SAFE_RELEASE(capture);
-    SAFE_RELEASE(client);
-    SAFE_RELEASE(device);
-    SAFE_RELEASE(enumerator);
+    QString err = doCapture();
+    if (!err.isEmpty()) emit captureError(err);
+
     CoUninitialize();
-
 #else
     emit captureError("Windows 전용 기능입니다.");
 #endif
-
     m_running = false;
 }
 
@@ -154,20 +157,34 @@ void WasapiCapture::fft(std::vector<std::complex<float>> &x)
 void WasapiCapture::processBuffer(const float *data, int frames,
                                    int channels, int sampleRate)
 {
-    for (int i = 0; i < frames; ++i) {
-        float mono = 0;
-        for (int ch = 0; ch < channels; ++ch)
-            mono += data[i * channels + ch];
-        m_sampleBuf.append(mono / channels);
+    {
+        QMutexLocker lk(&m_bufMutex);
+        for (int i = 0; i < frames; ++i) {
+            float mono = 0;
+            for (int ch = 0; ch < channels; ++ch)
+                mono += data[i * channels + ch];
+            m_sampleBuf.append(mono / channels);
+        }
     }
 
-    while (m_sampleBuf.size() >= FFT_SIZE) {
+    // 버퍼 크기 확인 (뮤텍스 없이 읽어도 worst-case 안전)
+    while (m_sampleBuf.size() - m_bufOffset >= FFT_SIZE) {
         std::vector<std::complex<float>> buf(FFT_SIZE);
-        for (int i = 0; i < FFT_SIZE; ++i) {
-            float w = 0.5f * (1.0f - cosf(2.0f * static_cast<float>(M_PI) * i / (FFT_SIZE-1)));
-            buf[i] = {m_sampleBuf[i] * w, 0.0f};
+        {
+            QMutexLocker lk(&m_bufMutex);
+            for (int i = 0; i < FFT_SIZE; ++i) {
+                float w = 0.5f * (1.0f - cosf(2.0f * static_cast<float>(M_PI) * i / (FFT_SIZE-1)));
+                buf[i] = {m_sampleBuf[m_bufOffset + i] * w, 0.0f};
+            }
+            m_bufOffset += FFT_SIZE / 2; // 50% 오버랩
+
+            // 버퍼가 너무 커지면 정리 (4096 이상 누적 시)
+            if (m_bufOffset > 4096) {
+                m_sampleBuf.erase(m_sampleBuf.begin(),
+                                   m_sampleBuf.begin() + m_bufOffset);
+                m_bufOffset = 0;
+            }
         }
-        m_sampleBuf = m_sampleBuf.mid(FFT_SIZE / 2);
 
         fft(buf);
 

@@ -96,8 +96,11 @@ void OpenRGBClient::onReadyRead()
 
     // 헤더 파싱 (16바이트: magic(4) + device_id(4) + type(4) + size(4))
     while (m_readBuffer.size() >= 16) {
+        // 매직 바이트 탐색 - 1바이트씩 제거 대신 indexOf로 O(N) 처리
         if (m_readBuffer.left(4) != MAGIC) {
-            m_readBuffer.remove(0, 1);
+            int idx = m_readBuffer.indexOf(MAGIC, 1);
+            if (idx < 0) { m_readBuffer.clear(); break; }
+            m_readBuffer.remove(0, idx);
             continue;
         }
 
@@ -191,17 +194,20 @@ void OpenRGBClient::setDeviceColor(int deviceIndex, const QColor &color)
 {
     if (!m_connected) return;
 
-    // UPDATE_SINGLE_LED (간단한 단색 설정)
-    // 실제로는 UPDATE_LEDS로 전체 LED 설정
+    // UPDATE_LEDS: 헤더(2) + N * RGBW(4)
+    // OpenRGB 프로토콜: quint16 count, then per-LED: R G B speed(0)
+    const int LED_COUNT = 1;
     QByteArray data;
     QDataStream ds(&data, QIODevice::WriteOnly);
     ds.setByteOrder(QDataStream::LittleEndian);
-    ds << (quint16)1;  // led count
-    ds << (quint16)0;  // led index
-    ds << (quint8)color.red() << (quint8)color.green() << (quint8)color.blue();
-    ds << (quint8)0;   // padding
-
-    sendPacket(deviceIndex, UPDATE_SINGLE_LED, data);
+    ds << (quint16)LED_COUNT;
+    for (int i = 0; i < LED_COUNT; ++i) {
+        ds << (quint8)color.red()
+           << (quint8)color.green()
+           << (quint8)color.blue()
+           << (quint8)0;   // speed / padding
+    }
+    sendPacket(deviceIndex, UPDATE_LEDS, data);
 }
 
 void OpenRGBClient::setDeviceColors(int deviceIndex, const QList<QColor> &colors)

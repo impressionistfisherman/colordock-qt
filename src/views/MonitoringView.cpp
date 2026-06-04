@@ -128,7 +128,10 @@ MonitoringView::MonitoringView(QWidget *parent) : QWidget(parent)
     m_timer->setInterval(1000);
     connect(m_timer, &QTimer::timeout, this, &MonitoringView::onPollTimer);
     m_timer->start();
-    onPollTimer(); // initial read
+    // 첫 호출: GetSystemTimes 기준점 초기화만 수행 (결과 버림)
+    getCpuUsage();
+    // 1초 후 첫 정상 샘플 표시
+    QTimer::singleShot(1000, this, &MonitoringView::onPollTimer);
 }
 
 void MonitoringView::setupUi()

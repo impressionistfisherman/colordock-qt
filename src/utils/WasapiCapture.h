@@ -1,6 +1,7 @@
 #pragma once
 #include <QThread>
 #include <QList>
+#include <QMutex>
 #include <atomic>
 #include <vector>
 #include <complex>
@@ -28,6 +29,8 @@ private:
 
     std::atomic<bool> m_running{false};
     QList<float>      m_sampleBuf;
+    QMutex            m_bufMutex;
+    int               m_bufOffset = 0; // mid() 대신 오프셋 방식
 
     static const int FFT_SIZE = 1024;
     static const int NUM_BARS = 32;

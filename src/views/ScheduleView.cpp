@@ -354,18 +354,30 @@ void ScheduleView::onCheckTriggers()
                 fired = true;
             }
         } else if (s.triggerType == "process" && !s.processName.isEmpty()) {
-            QProcess proc;
-            proc.start("tasklist", {"/FI", QString("IMAGENAME eq %1").arg(s.processName), "/NH"});
-            proc.waitForFinished(1500);
-            if (proc.readAllStandardOutput().contains(s.processName.toUtf8())) {
-                QString key = "proc_" + s.id;
-                if (!m_firedToday.contains(key)) {
-                    m_firedToday.insert(key);
-                    fired = true;
+            // 비동기 프로세스 감지 — UI 스레드 블로킹 없이 실행
+            QString procName = s.processName;
+            QString schedId  = s.id;
+            auto *proc = new QProcess(this);
+            proc->start("tasklist", {"/FI", QString("IMAGENAME eq %1").arg(procName), "/NH", "/FO", "CSV"});
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                    this, [this, proc, procName, schedId](int) {
+                bool found = proc->readAllStandardOutput().contains(procName.toUtf8());
+                QString key = "proc_" + schedId;
+                if (found) {
+                    if (!m_firedToday.contains(key)) {
+                        m_firedToday.insert(key);
+                        // 스케줄 찾아서 액션 실행
+                        for (const Schedule &sc : m_schedules) {
+                            if (sc.id == schedId && m_dm)
+                                m_dm->applyEffect(sc.actionValue, QColor(0,180,255));
+                        }
+                    }
+                } else {
+                    m_firedToday.remove(key);
                 }
-            } else {
-                m_firedToday.remove("proc_" + s.id); // 프로세스 종료 시 재발화 허용
-            }
+                proc->deleteLater();
+            });
+            continue; // 비동기이므로 fired 플래그 불필요
         }
 
         if (fired && m_dm) {

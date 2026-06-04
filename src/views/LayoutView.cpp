@@ -46,7 +46,17 @@ QRectF LayoutCanvas::deviceRect(const LayoutDevice &d) const
 int LayoutCanvas::hitTest(const QPointF &p) const
 {
     for (int i = m_devices.size()-1; i >= 0; --i) {
-        if (deviceRect(m_devices[i]).contains(p)) return i;
+        const LayoutDevice &d = m_devices[i];
+        // 회전 역변환: 포인트를 기기 로컬 좌표계로 변환 후 AABB 체크
+        QPointF center = deviceRect(d).center();
+        double  angle  = -d.rotation * M_PI / 180.0;
+        double  dx     = p.x() - center.x();
+        double  dy     = p.y() - center.y();
+        double  lx     = dx * cos(angle) - dy * sin(angle);
+        double  ly     = dx * sin(angle) + dy * cos(angle);
+        double  hw     = (BASE_W * d.scale) / 2.0;
+        double  hh     = (BASE_H * d.scale) / 2.0;
+        if (qAbs(lx) <= hw && qAbs(ly) <= hh) return i;
     }
     return -1;
 }

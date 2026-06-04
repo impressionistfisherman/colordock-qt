@@ -169,15 +169,28 @@ void HidScannerDialog::onScan()
         return;
     }
 
+    // 올바른 CSV 파싱 (따옴표 내 쉼표 처리)
+    auto parseCsvLine = [](const QString &line) -> QStringList {
+        QStringList result;
+        QString cur;
+        bool inQ = false;
+        for (const QChar &ch : line) {
+            if (ch == '"') { inQ = !inQ; }
+            else if (ch == ',' && !inQ) { result << cur.trimmed(); cur.clear(); }
+            else cur += ch;
+        }
+        result << cur.trimmed();
+        return result;
+    };
+
     int count = 0;
     for (int i = 1; i < lines.size(); ++i) {
-        QString line = lines[i].trimmed().remove('"');
-        QStringList cols = line.split(',');
+        QStringList cols = parseCsvLine(lines[i].trimmed());
         if (cols.size() < 3) continue;
 
-        QString name    = cols[0].trimmed();
-        QString mfg     = cols[1].trimmed();
-        QString devId   = cols[2].trimmed();
+        QString name  = cols[0];
+        QString mfg   = cols[1];
+        QString devId = cols[2];
 
         // VID/PID 파싱 (예: HID\VID_258A&PID_0011...)
         QString vid, pid;

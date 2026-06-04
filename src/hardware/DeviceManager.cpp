@@ -33,6 +33,7 @@ DeviceManager::DeviceManager(QObject *parent)
 
 DeviceManager::~DeviceManager()
 {
+    m_effectTimer->stop();
     m_openrgb->disconnect();
 }
 
@@ -128,21 +129,35 @@ void DeviceManager::setAllColor(const QColor &color)
 
 void DeviceManager::applyEffect(const QString &effectName, const QColor &baseColor)
 {
-    if (effectName != m_activeEffect || baseColor != m_baseColor) {
+    // 효과 또는 색상이 바뀔 때만 페이즈 리셋 (타이머 콜백 재진입 시 리셋 방지)
+    bool effectChanged = (effectName != m_activeEffect);
+    bool colorChanged  = (baseColor  != m_baseColor);
+
+    if (effectChanged || colorChanged) {
         m_activeEffect = effectName;
         m_baseColor    = baseColor;
-        m_effectPhase  = 0.0;
-        if (effectName.isEmpty()) {
+        if (effectChanged) m_effectPhase = 0.0;   // 색상만 바뀌면 페이즈 유지
+        if (effectName.isEmpty() || effectName == "off" || effectName == "disabled") {
             m_effectTimer->stop();
+            // 조명 끄기
+            for (RGBDevice &dev : m_devices) {
+                dev.leds.fill(Qt::black);
+                if (dev.openrgbSource)
+                    m_openrgb->setDeviceColor(dev.openrgbIndex, Qt::black);
+            }
             return;
         }
-        m_effectTimer->start();
+        if (effectName == "static") {
+            m_effectTimer->stop(); // static은 타이머 불필요
+        } else {
+            m_effectTimer->start();
+        }
     }
 
-    // 효과 계산 (20fps 타이머에서 호출)
+    // 효과 계산
     for (int i = 0; i < m_devices.size(); ++i) {
         RGBDevice &dev = m_devices[i];
-        QColor c;
+        QColor c = baseColor;
 
         if (effectName == "static") {
             c = baseColor;
@@ -151,12 +166,31 @@ void DeviceManager::applyEffect(const QString &effectName, const QColor &baseCol
             c = QColor::fromHsvF(hue / 360.0, 1.0, 1.0);
         } else if (effectName == "breathing") {
             double v = (sin(m_effectPhase * 2 * M_PI) + 1.0) / 2.0;
-            c = QColor(baseColor.red() * v, baseColor.green() * v, baseColor.blue() * v);
+            c = QColor(int(baseColor.red()   * v),
+                       int(baseColor.green() * v),
+                       int(baseColor.blue()  * v));
         } else if (effectName == "wave") {
             double offset = fmod(m_effectPhase * 360.0 + i * 45.0, 360.0);
             c = QColor::fromHsvF(offset / 360.0, 1.0, 1.0);
-        } else {
-            c = baseColor;
+        } else if (effectName == "strobe") {
+            // 10Hz 스트로브: 페이즈 0~0.5 ON, 0.5~1.0 OFF
+            c = (m_effectPhase < 0.5) ? baseColor : Qt::black;
+        } else if (effectName == "fire") {
+            // 저음 레드~오렌지~옐로우 그라디언트
+            double t = fmod(m_effectPhase + i * 0.1, 1.0);
+            if (t < 0.33)      c = QColor(255, int(t / 0.33 * 255), 0);
+            else if (t < 0.66) c = QColor(255, 255, 0);
+            else               c = QColor(255, int((1.0 - (t - 0.66) / 0.34) * 128), 0);
+        } else if (effectName == "ocean") {
+            double t = fmod(m_effectPhase + i * 0.08, 1.0);
+            c = QColor::fromHsvF(0.55 + t * 0.1, 0.9, 0.8 + sin(t * M_PI) * 0.2);
+        } else if (effectName == "sparkle") {
+            // 랜덤 반짝임 (디바이스 인덱스 기반 의사난수)
+            double r = fmod(sin((i + 1) * 127.1 + m_effectPhase * 311.7) * 43758.5, 1.0);
+            c = (r > 0.85) ? baseColor : Qt::black;
+        } else if (effectName == "sensor" || effectName == "audio" ||
+                   effectName == "ambient" || effectName == "game") {
+            c = baseColor; // 외부 데이터 연동 — 현재는 baseColor 유지
         }
 
         dev.leds.fill(c);
